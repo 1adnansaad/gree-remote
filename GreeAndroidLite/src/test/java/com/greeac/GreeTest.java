@@ -53,10 +53,12 @@ public class GreeTest {
             assertTrue(d.gcm);
             assertEquals(UNIT_KEY, d.key);
             assertEquals(Integer.valueOf(24), Gree.status(d).get("SetTem"));
-            Gree.set(d, new String[]{"TemUn", "SetTem"}, new int[]{0, 27});
+            Gree.set(d, new String[]{"TemUn", "SetTem"}, new int[]{0, 27}, false);
             Map<String, Integer> st = Gree.status(d);
             assertEquals(Integer.valueOf(27), st.get("SetTem"));
             assertEquals(Integer.valueOf(1), st.get("Pow"));
+            assertEquals(Integer.valueOf(1), state.get("Buzzer_ON_OFF")); // muted, both ways
+            assertEquals(Integer.valueOf(0), state.get("BuzzerCtrl"));
         }
     }
 

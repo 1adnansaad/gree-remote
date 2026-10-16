@@ -104,9 +104,16 @@ public class Gree {
         return m;
     }
 
-    /** Sets each opt[i] to p[i]. */
-    public static void set(Device d, String[] opt, int[] p) throws Exception {
-        String r = call(d, "{\"opt\":[" + quote(opt) + "],\"p\":" + Arrays.toString(p) + ",\"t\":\"cmd\"}");
+    /** Sets each opt[i] to p[i]; the unit beeps for it only if beep. */
+    public static void set(Device d, String[] opt, int[] p, boolean beep) throws Exception {
+        String[] o = Arrays.copyOf(opt, opt.length + 2);
+        int[] v = Arrays.copyOf(p, p.length + 2);
+        // the beep is per command: older firmware mutes on Buzzer_ON_OFF 1, newer beeps on BuzzerCtrl 1 (as greeclimate)
+        o[opt.length] = "Buzzer_ON_OFF";
+        v[p.length] = beep ? 0 : 1;
+        o[opt.length + 1] = "BuzzerCtrl";
+        v[p.length + 1] = beep ? 1 : 0;
+        String r = call(d, "{\"opt\":[" + quote(o) + "],\"p\":" + Arrays.toString(v) + ",\"t\":\"cmd\"}");
         String code = str(r, "r");
         if (code != null && !code.equals("200")) throw new IOException("unit refused: " + r);
     }

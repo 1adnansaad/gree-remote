@@ -1,16 +1,21 @@
 package com.greeac;
 
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -18,17 +23,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.BooleanSupplier;
 
 public class MainActivity extends Activity {
     static final int POLL_MS = 5000; // units don't report changes made with the IR remote, so ask
     static final int SCAN_QUIET_MS = 2000; // scan ends once no unit has answered for this long
     static final int MIN_T = 16, MAX_T = 30; // °C
-    static final int ON = 0xFF1E88E5, OFF = 0xFF424242; // button tint: the unit's current setting, the rest
+    static final int ON = 0xFF1E88E5, OFF = 0xFF424242; // button tint: what's on, the rest
 
     final ExecutorService net = Executors.newSingleThreadExecutor(); // one request at a time: no network on the UI thread
     final Handler ui = new Handler(Looper.getMainLooper());
-    final List<Runnable> marks = new ArrayList<>(); // each highlights its button from st
+    final List<Runnable> marks = new ArrayList<>(); // each highlights its button from st and prefs
     Map<String, Integer> st = new HashMap<>(); // the unit's last known settings; UI thread only
+    List<Gree.Device> acs = new ArrayList<>(); // the last scan's
+    SharedPreferences prefs; // per AC, by MAC: "name.", "beep."; and the "pinned" one's MAC
     volatile Gree.Device dev;
     Button scanBtn;
     TextView msg, title, room, temp;
@@ -43,6 +51,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
+        prefs = getSharedPreferences("acs", MODE_PRIVATE);
         scanBtn = button("Scan network", v -> scan());
         msg = text(16);
         list = vertical();
@@ -68,6 +77,9 @@ public class MainActivity extends Activity {
                 ctl("Sleep", "SwhSlp", -1)));
         panel.addView(row(ctl("Light", "Lig", -1), ctl("X-Fan", "Blo", -1), ctl("Health", "Health", -1),
                 ctl("Eco", "SvSt", -1)));
+        panel.addView(label("This AC"));
+        panel.addView(row(button("Rename", v -> rename()), lit(button("Pin", v -> pin()), () -> pinned(dev)),
+                lit(button("Beep", v -> beep()), () -> beeps(dev))));
 
         LinearLayout root = vertical();
         root.addView(scanBtn);
@@ -114,23 +126,31 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 scanBtn.setEnabled(true);
                 msg.setText(m);
-                list.removeAllViews();
-                for (Gree.Device d : f) list.addView(button(d.name + "   " + d.ip, v -> select(d)));
-                if (f.size() == 1) select(f.get(0));
+                acs = f;
+                listAcs();
+                Gree.Device pick = f.size() == 1 ? f.get(0) : null;
+                for (Gree.Device d : f) if (pinned(d)) pick = d;
+                if (pick != null) select(pick);
             });
         });
+    }
+
+    /** A button per AC the scan found, the pinned one marked. */
+    void listAcs() {
+        list.removeAllViews();
+        for (Gree.Device d : acs) list.addView(button((pinned(d) ? "📌 " : "") + name(d) + "   " + d.ip, v -> select(d)));
     }
 
     void select(Gree.Device d) {
         dev = d;
         st = new HashMap<>();
         panel.setVisibility(View.GONE);
-        msg.setText("Connecting to " + d.name + "…");
+        msg.setText("Connecting to " + name(d) + "…");
         net.execute(() -> {
             try {
                 if (d.key == null) Gree.bind(d);
             } catch (Exception e) {
-                say("Couldn't pair with " + d.name + " (" + d.ip + "): " + e.getMessage());
+                say("Couldn't pair with " + name(d) + " (" + d.ip + "): " + e.getMessage());
                 return;
             }
             refresh();
@@ -146,13 +166,12 @@ public class MainActivity extends Activity {
             runOnUiThread(() -> {
                 if (d != dev) return;
                 st = s;
-                title.setText(d.name + "   " + d.ip);
                 msg.setText("");
                 panel.setVisibility(View.VISIBLE);
                 render();
             });
         } catch (Exception e) {
-            say("No reply from " + d.name + " (" + d.ip + ")");
+            say("No reply from " + name(d) + " (" + d.ip + ")");
         }
     }
 
@@ -163,9 +182,9 @@ public class MainActivity extends Activity {
         render();
         net.execute(() -> {
             try {
-                Gree.set(d, opt, p);
+                Gree.set(d, opt, p, beeps(d));
             } catch (Exception e) {
-                say("No reply from " + d.name + ": " + e.getMessage());
+                say("No reply from " + name(d) + ": " + e.getMessage());
             }
             refresh();
         });
@@ -178,6 +197,7 @@ public class MainActivity extends Activity {
 
     void render() {
         for (Runnable m : marks) m.run();
+        title.setText(name(dev) + "   " + dev.ip);
         Integer t = st.get("SetTem"), r = st.get("TemSen");
         temp.setText(t == null ? "--" : t + "°C");
         room.setText(r == null || r == 0 ? "" : "Room " + Gree.roomTemp(r) + "°C");
@@ -185,13 +205,61 @@ public class MainActivity extends Activity {
 
     void say(String m) { runOnUiThread(() -> msg.setText(m)); }
 
+    /** What the user calls d, else what it calls itself. */
+    String name(Gree.Device d) { return prefs.getString("name." + d.mac, d.name); }
+
+    boolean pinned(Gree.Device d) { return d.mac.equals(prefs.getString("pinned", null)); }
+
+    boolean beeps(Gree.Device d) { return prefs.getBoolean("beep." + d.mac, true); }
+
+    void rename() {
+        Gree.Device d = dev;
+        EditText e = new EditText(this);
+        e.setSingleLine();
+        e.setText(name(d));
+        e.setSelectAllOnFocus(true);
+        LinearLayout box = vertical();
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        box.addView(e);
+        AlertDialog a = new AlertDialog.Builder(this).setTitle("Name this AC").setView(box)
+                .setPositiveButton("Save", (x, w) -> {
+                    String n = e.getText().toString().trim();
+                    prefs.edit().putString("name." + d.mac, n.isEmpty() ? null : n).apply(); // empty: its own name again
+                    render();
+                    listAcs();
+                })
+                .setNegativeButton("Cancel", null).create();
+        a.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        e.requestFocus();
+        a.show();
+    }
+
+    /** One pin: pinning this unpins the other. */
+    void pin() {
+        boolean on = !pinned(dev);
+        prefs.edit().putString("pinned", on ? dev.mac : null).apply();
+        Toast.makeText(this, on ? "Opens at startup" : "Unpinned", Toast.LENGTH_SHORT).show();
+        render();
+        listAcs();
+    }
+
+    void beep() {
+        prefs.edit().putBoolean("beep." + dev.mac, !beeps(dev)).apply(); // the unit hears it with the next command
+        render();
+    }
+
     /** A button that sets col to val, or toggles it 0/1 when val < 0; lit while the unit has it so. */
     Button ctl(String label, String col, int val) {
-        Button b = button(label, v -> send(new String[]{col}, new int[]{val >= 0 ? val : st.getOrDefault(col, 0) == 1 ? 0 : 1}));
-        marks.add(() -> {
-            Integer v = st.get(col);
-            b.setBackgroundTintList(ColorStateList.valueOf(v != null && v == (val < 0 ? 1 : val) ? ON : OFF));
-        });
+        return lit(button(label, v -> send(new String[]{col}, new int[]{val >= 0 ? val : st.getOrDefault(col, 0) == 1 ? 0 : 1})),
+                () -> {
+                    Integer v = st.get(col);
+                    return v != null && v == (val < 0 ? 1 : val);
+                });
+    }
+
+    /** b, tinted ON while on says so; render() checks again. */
+    Button lit(Button b, BooleanSupplier on) {
+        marks.add(() -> b.setBackgroundTintList(ColorStateList.valueOf(on.getAsBoolean() ? ON : OFF)));
         b.setTextColor(0xFFFFFFFF);
         b.setBackgroundTintList(ColorStateList.valueOf(OFF));
         return b;
