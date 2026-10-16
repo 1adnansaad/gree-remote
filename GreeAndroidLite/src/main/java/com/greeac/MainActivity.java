@@ -1,9 +1,11 @@
 package com.greeac;
 
+import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -36,9 +38,7 @@ public class MainActivity extends Activity {
     final List<Runnable> marks = new ArrayList<>(); // each highlights its button from st and prefs
     Map<String, Integer> st = new HashMap<>(); // the unit's last known settings; UI thread only
     List<Gree.Device> acs = new ArrayList<>(); // the last scan's
-    // per AC, by MAC: the user's "name.", "beep."; where it was last reached: "ip.", "key.", "gcm.", "unit." (its own
-    // name); and the "pinned" one's MAC
-    SharedPreferences prefs;
+    Prefs prefs;
     boolean scanned; // UI thread only
     volatile Gree.Device dev;
     Button scanBtn;
@@ -54,7 +54,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onCreate(Bundle b) {
         super.onCreate(b);
-        prefs = getSharedPreferences("acs", MODE_PRIVATE);
+        prefs = new Prefs(this);
         scanBtn = button("Scan network", v -> scan());
         msg = text(16);
         list = vertical();
@@ -81,8 +81,8 @@ public class MainActivity extends Activity {
         panel.addView(row(ctl("Light", "Lig", -1), ctl("X-Fan", "Blo", -1), ctl("Health", "Health", -1),
                 ctl("Eco", "SvSt", -1)));
         panel.addView(label("This AC"));
-        panel.addView(row(button("Rename", v -> rename()), lit(button("Pin", v -> pin()), () -> pinned(dev)),
-                lit(button("Beep", v -> beep()), () -> beeps(dev))));
+        panel.addView(row(button("Rename", v -> rename()), lit(button("Pin", v -> pin()), () -> prefs.pinned(dev)),
+                lit(button("Beep", v -> beep()), () -> prefs.beeps(dev))));
 
         LinearLayout root = vertical();
         root.addView(scanBtn);
@@ -98,8 +98,13 @@ public class MainActivity extends Activity {
         });
         sv.addView(root);
         setContentView(sv);
-        Gree.Device p = pinnedAc();
-        if (p != null) select(p); else scan();
+        Gree.Device p = prefs.pinnedAc();
+        if (p == null) {
+            scan();
+        } else {
+            Watch.start(this); // in case it was stopped
+            select(p);
+        }
     }
 
     @Override protected void onResume() {
@@ -134,7 +139,7 @@ public class MainActivity extends Activity {
                 acs = f;
                 listAcs();
                 Gree.Device pick = f.size() == 1 ? f.get(0) : null;
-                for (Gree.Device d : f) if (pinned(d)) pick = d;
+                for (Gree.Device d : f) if (prefs.pinned(d)) pick = d;
                 if (pick != null) select(pick);
             });
         });
@@ -143,22 +148,22 @@ public class MainActivity extends Activity {
     /** A button per AC the scan found, the pinned one marked. */
     void listAcs() {
         list.removeAllViews();
-        for (Gree.Device d : acs) list.addView(button((pinned(d) ? "📌 " : "") + name(d) + "   " + d.ip, v -> select(d)));
+        for (Gree.Device d : acs) list.addView(button((prefs.pinned(d) ? "📌 " : "") + prefs.name(d) + "   " + d.ip, v -> select(d)));
     }
 
     void select(Gree.Device d) {
         dev = d;
         st = new HashMap<>();
         panel.setVisibility(View.GONE);
-        msg.setText("Connecting to " + name(d) + "…");
+        msg.setText("Connecting to " + prefs.name(d) + "…");
         net.execute(() -> {
             try {
                 if (d.key == null) {
                     Gree.bind(d);
-                    remember(d);
+                    prefs.remember(d);
                 }
             } catch (Exception e) {
-                say("Couldn't pair with " + name(d) + " (" + d.ip + "): " + e.getMessage());
+                say("Couldn't pair with " + prefs.name(d) + " (" + d.ip + "): " + e.getMessage());
                 return;
             }
             refresh();
@@ -171,6 +176,7 @@ public class MainActivity extends Activity {
         if (d == null || d.key == null) return;
         try {
             Map<String, Integer> s = Gree.status(d);
+            if (prefs.pinned(d)) Watch.show(this, d, s); // the bar follows what's done here
             runOnUiThread(() -> {
                 if (d != dev) return;
                 st = s;
@@ -179,7 +185,7 @@ public class MainActivity extends Activity {
                 render();
             });
         } catch (Exception e) {
-            say("No reply from " + name(d) + " (" + d.ip + ")");
+            say("No reply from " + prefs.name(d) + " (" + d.ip + ")");
             ui.post(() -> { if (!scanned) scan(); }); // the pinned AC isn't where it was: find it, maybe at a new IP
         }
     }
@@ -191,9 +197,9 @@ public class MainActivity extends Activity {
         render();
         net.execute(() -> {
             try {
-                Gree.set(d, opt, p, beeps(d));
+                Gree.set(d, opt, p, prefs.beeps(d));
             } catch (Exception e) {
-                say("No reply from " + name(d) + ": " + e.getMessage());
+                say("No reply from " + prefs.name(d) + ": " + e.getMessage());
             }
             refresh();
         });
@@ -206,7 +212,7 @@ public class MainActivity extends Activity {
 
     void render() {
         for (Runnable m : marks) m.run();
-        title.setText(name(dev) + "   " + dev.ip);
+        title.setText(prefs.name(dev) + "   " + dev.ip);
         Integer t = st.get("SetTem"), r = st.get("TemSen");
         temp.setText(t == null ? "--" : t + "°C");
         room.setText(r == null || r == 0 ? "" : "Room " + Gree.roomTemp(r) + "°C");
@@ -214,43 +220,21 @@ public class MainActivity extends Activity {
 
     void say(String m) { runOnUiThread(() -> msg.setText(m)); }
 
-    /** What the user calls d, else what it calls itself. */
-    String name(Gree.Device d) { return prefs.getString("name." + d.mac, d.name); }
-
-    boolean pinned(Gree.Device d) { return d.mac.equals(prefs.getString("pinned", null)); }
-
-    boolean beeps(Gree.Device d) { return prefs.getBoolean("beep." + d.mac, true); }
-
-    /** Where d is and its key, so pinnedAc() can skip scan and bind. */
-    void remember(Gree.Device d) {
-        prefs.edit().putString("ip." + d.mac, d.ip).putString("key." + d.mac, d.key).putBoolean("gcm." + d.mac, d.gcm)
-                .putString("unit." + d.mac, d.name).apply();
-    }
-
-    /** The pinned AC where it was last reached, ready to talk to; null if none. */
-    Gree.Device pinnedAc() {
-        String mac = prefs.getString("pinned", null), ip = mac == null ? null : prefs.getString("ip." + mac, null);
-        if (ip == null) return null;
-        Gree.Device d = new Gree.Device(ip, mac, prefs.getString("unit." + mac, mac), prefs.getBoolean("gcm." + mac, false));
-        d.key = prefs.getString("key." + mac, null);
-        return d;
-    }
-
     void rename() {
         Gree.Device d = dev;
         EditText e = new EditText(this);
         e.setSingleLine();
-        e.setText(name(d));
+        e.setText(prefs.name(d));
         e.setSelectAllOnFocus(true);
         LinearLayout box = vertical();
         box.setPadding(dp(20), dp(8), dp(20), 0);
         box.addView(e);
         AlertDialog a = new AlertDialog.Builder(this).setTitle("Name this AC").setView(box)
                 .setPositiveButton("Save", (x, w) -> {
-                    String n = e.getText().toString().trim();
-                    prefs.edit().putString("name." + d.mac, n.isEmpty() ? null : n).apply(); // empty: its own name again
+                    prefs.setName(d, e.getText().toString().trim());
                     render();
                     listAcs();
+                    if (prefs.pinned(d)) Watch.show(this, d, st);
                 })
                 .setNegativeButton("Cancel", null).create();
         a.getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
@@ -258,17 +242,23 @@ public class MainActivity extends Activity {
         a.show();
     }
 
-    /** One pin: pinning this unpins the other. */
     void pin() {
-        boolean on = !pinned(dev);
-        prefs.edit().putString("pinned", on ? dev.mac : null).apply();
-        Toast.makeText(this, on ? "Opens at startup" : "Unpinned", Toast.LENGTH_SHORT).show();
+        boolean on = !prefs.pinned(dev);
+        prefs.setPinned(dev, on);
+        if (on) {
+            if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 0); // for its controls
+            Watch.start(this);
+        } else {
+            Watch.stop(this);
+        }
+        Toast.makeText(this, on ? "Opens at startup, controls in notifications" : "Unpinned", Toast.LENGTH_SHORT).show();
         render();
         listAcs();
     }
 
     void beep() {
-        prefs.edit().putBoolean("beep." + dev.mac, !beeps(dev)).apply(); // the unit hears it with the next command
+        prefs.setBeeps(dev, !prefs.beeps(dev)); // the unit hears it with the next command
         render();
     }
 
