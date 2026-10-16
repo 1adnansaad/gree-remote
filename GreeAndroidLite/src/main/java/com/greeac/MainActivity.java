@@ -36,7 +36,10 @@ public class MainActivity extends Activity {
     final List<Runnable> marks = new ArrayList<>(); // each highlights its button from st and prefs
     Map<String, Integer> st = new HashMap<>(); // the unit's last known settings; UI thread only
     List<Gree.Device> acs = new ArrayList<>(); // the last scan's
-    SharedPreferences prefs; // per AC, by MAC: "name.", "beep."; and the "pinned" one's MAC
+    // per AC, by MAC: the user's "name.", "beep."; where it was last reached: "ip.", "key.", "gcm.", "unit." (its own
+    // name); and the "pinned" one's MAC
+    SharedPreferences prefs;
+    boolean scanned; // UI thread only
     volatile Gree.Device dev;
     Button scanBtn;
     TextView msg, title, room, temp;
@@ -95,7 +98,8 @@ public class MainActivity extends Activity {
         });
         sv.addView(root);
         setContentView(sv);
-        scan();
+        Gree.Device p = pinnedAc();
+        if (p != null) select(p); else scan();
     }
 
     @Override protected void onResume() {
@@ -114,6 +118,7 @@ public class MainActivity extends Activity {
     }
 
     void scan() {
+        scanned = true;
         scanBtn.setEnabled(false);
         msg.setText("Scanning…");
         net.execute(() -> {
@@ -148,7 +153,10 @@ public class MainActivity extends Activity {
         msg.setText("Connecting to " + name(d) + "…");
         net.execute(() -> {
             try {
-                if (d.key == null) Gree.bind(d);
+                if (d.key == null) {
+                    Gree.bind(d);
+                    remember(d);
+                }
             } catch (Exception e) {
                 say("Couldn't pair with " + name(d) + " (" + d.ip + "): " + e.getMessage());
                 return;
@@ -172,6 +180,7 @@ public class MainActivity extends Activity {
             });
         } catch (Exception e) {
             say("No reply from " + name(d) + " (" + d.ip + ")");
+            ui.post(() -> { if (!scanned) scan(); }); // the pinned AC isn't where it was: find it, maybe at a new IP
         }
     }
 
@@ -211,6 +220,21 @@ public class MainActivity extends Activity {
     boolean pinned(Gree.Device d) { return d.mac.equals(prefs.getString("pinned", null)); }
 
     boolean beeps(Gree.Device d) { return prefs.getBoolean("beep." + d.mac, true); }
+
+    /** Where d is and its key, so pinnedAc() can skip scan and bind. */
+    void remember(Gree.Device d) {
+        prefs.edit().putString("ip." + d.mac, d.ip).putString("key." + d.mac, d.key).putBoolean("gcm." + d.mac, d.gcm)
+                .putString("unit." + d.mac, d.name).apply();
+    }
+
+    /** The pinned AC where it was last reached, ready to talk to; null if none. */
+    Gree.Device pinnedAc() {
+        String mac = prefs.getString("pinned", null), ip = mac == null ? null : prefs.getString("ip." + mac, null);
+        if (ip == null) return null;
+        Gree.Device d = new Gree.Device(ip, mac, prefs.getString("unit." + mac, mac), prefs.getBoolean("gcm." + mac, false));
+        d.key = prefs.getString("key." + mac, null);
+        return d;
+    }
 
     void rename() {
         Gree.Device d = dev;
